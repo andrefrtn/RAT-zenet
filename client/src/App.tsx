@@ -254,8 +254,8 @@ export default function App() {
         return <>
           <FormSection title="Identificação do chamado">
             <div className="field-grid call-fields">
-              {field('number', { placeholder: 'Ex.: 2026-001' })}{field('serviceType', { choices: serviceTypes })}
-              {field('ticket', { placeholder: 'Ex.: OS-1042' })}{field('date', { type: 'date' })}
+              {field('number',)}{field('serviceType', { choices: serviceTypes })}
+              {field('ticket', )}{field('date', { type: 'date' })}
               {field('opening', { choices: openingChannels })}
             </div>
           </FormSection>
@@ -264,8 +264,8 @@ export default function App() {
               {field('requester', { placeholder: 'Nome do solicitante' })}{field('technician', { placeholder: 'Nome do técnico' })}</div>
           </FormSection>
           <FormSection title="Equipamento">
-            <div className="field-grid equipment-fields">{field('equipment', { placeholder: 'Ex.: Computador Dell OptiPlex' })}{field('sector', { placeholder: 'Ex.: Administrativo' })}
-              {field('serial', { placeholder: 'Número de série do equipamento' })}{field('asset', { placeholder: 'Código patrimonial' })}</div>
+            <div className="field-grid equipment-fields">{field('equipment', )}{field('sector', { placeholder: 'Ex.: Administrativo' })}
+              {field('serial', { placeholder: 'Número de série do equipamento' })}{field('asset', )}</div>
           </FormSection>
         </>;
       case 1:
