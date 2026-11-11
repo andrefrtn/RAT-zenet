@@ -2,27 +2,29 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useForm } from 'react-hook-form';
 import { ArrowLeft, ArrowRight, CheckCircle2, Download, LoaderCircle } from 'lucide-react';
 import {
-  closingIssues, closingKeys, company, dataKeys, detailLimit, displayDate, emptyDraft, labels,
-  openingChannels, ratFields, reportKeys, serviceTypes, shortLimit, signatureKeys, statuses, totals,
-  type Draft, type Field,
+  closingIssues, closingKeys, company, dataKeys, detailLimit, displayDate, labels,
+  openingChannels, ratFields, reportKeys, serviceTypes, shortLimit, statuses, totals, photoCategories,
+  type Draft, type Field, type Technician, type PhotoLimits, type Issuance, type PhotoCategory,
 } from '../../shared/rat';
 import { DateField, SelectField, TextAreaField, TextField, TimeField } from './FormFields';
 import { SignatureField } from './SignaturePad';
 import { FormSection, StatusIndicator, StepNavigation } from './Workspace';
-import { createId, readDraft, removeDraft, writeDraft, type Session } from './storage';
+import { createId, blankDraft, removeDraft, writeDraft, type Session, type Snapshot } from './storage';
+import { Access } from './Access';
+import { Photos } from './Photos';
+import { apiFetch, downloadPdf } from './api';
 
 const steps = [
   { short: 'Atendimento', title: 'Dados do atendimento', description: 'Identifique o chamado, o cliente e o equipamento atendido.', fields: dataKeys },
   { short: 'Relatório técnico', title: 'Relatório técnico', description: 'Documente o problema, a solução e as pendências.', fields: reportKeys },
   { short: 'Fechamento', title: 'Fechamento', description: 'Registre os horários, o deslocamento e a situação final do equipamento.', fields: closingKeys },
-  { short: 'Assinaturas', title: 'Assinaturas', description: 'Colete as assinaturas do atendimento nesta tela.', fields: signatureKeys },
+  { short: 'Assinaturas', title: 'Assinaturas', description: 'Colete a assinatura do cliente e de cada técnico participante.', fields: ['clientSignature'] as Field[] },
   { short: 'Revisão', title: 'Revisão', description: 'Confira os dados e as assinaturas antes de finalizar.', fields: [] },
 ];
-const required = new Set<Field>(['number', 'serviceType', 'opening', 'date', 'client', 'technician', 'equipment', 'problem', 'arrival', 'start', 'end', 'status']);
+const required = new Set<Field>(['serviceType', 'opening', 'date', 'client', 'equipment', 'problem', 'arrival', 'start', 'end', 'status']);
 const validationNotice = 'Confira os campos destacados.';
-type Errors = Partial<Record<Field, string>>;
-type Config = { requireTechnician: boolean; mailMode: 'test' | 'smtp' };
-type Result = { report: Draft; pdf: Blob; filename: string; mode: Config['mailMode'] };
+type Errors = Record<string, string | undefined>;
+type Config = { technicians: Technician[]; photoLimits: PhotoLimits; numberPreview: string | null };
 type ApiError = { message?: string; editable?: boolean; errors?: Partial<Record<Field, string[]>> };
 
 function ReviewFields({ fields, values }: { fields: readonly Field[]; values: Draft }) {
@@ -33,7 +35,12 @@ function ReviewFields({ fields, values }: { fields: readonly Field[]; values: Dr
 }
 
 export default function App() {
-  const [initial] = useState(readDraft);
+  return <Access>{initial => <RatForm initial={initial} />}</Access>;
+}
+
+function RatForm({ initial }: { initial: Snapshot }) {
+  const legacyRef = useRef(initial.legacy);
+  const legacy = legacyRef.current;
   const [session, setSession] = useState(initial.session);
   const sessionRef = useRef(session);
   const [config, setConfig] = useState<Config | null>(null);
@@ -44,7 +51,10 @@ export default function App() {
   const [storageError, setStorageError] = useState(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const [result, setResult] = useState<Result | null>(null);
+  const [result, setResult] = useState<Issuance | null>(initial.session.emitted ?? null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [pdfError, setPdfError] = useState('');
+  const discarding = useRef(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
   const discardButton = useRef<HTMLButtonElement>(null);
@@ -56,10 +66,10 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch('/api/config', { signal: controller.signal }).then(async response => {
+    apiFetch('/api/config', { signal: controller.signal }).then(async response => {
       if (!response.ok) throw new Error();
       const next = await response.json() as Config;
-      if (typeof next.requireTechnician !== 'boolean' || !['smtp', 'test'].includes(next.mailMode)) throw new Error();
+      if (!Array.isArray(next.technicians) || !next.photoLimits) throw new Error();
       setConfig(next);
       setConfigError(false);
     }).catch(() => {
@@ -69,16 +79,31 @@ export default function App() {
   }, [configAttempt]);
 
   useEffect(() => {
+    if (result || session.locked) return;
+    const refresh = () => { if (!document.hidden) setConfigAttempt(value => value + 1); };
+    const timer = window.setInterval(refresh, 60_000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [result, session.locked]);
+
+  useEffect(() => {
     const subscription = watch(() => {
-      setStorageError(!writeDraft(getValues(), sessionRef.current));
+      if (!discarding.current) void writeDraft(getValues(), sessionRef.current, legacyRef.current).then(saved => setStorageError(!saved));
     });
     return () => subscription.unsubscribe();
   }, [watch, getValues]);
 
-  function persist(next: Session) {
+  async function persist(next: Session) {
     sessionRef.current = next;
     setSession(next);
-    setStorageError(!writeDraft(getValues(), next));
+    const saved = await writeDraft(getValues(), next, legacyRef.current);
+    setStorageError(!saved);
+    return saved;
   }
 
   function moveTo(next: number) {
@@ -89,7 +114,7 @@ export default function App() {
     requestAnimationFrame(() => heading.current?.focus({ preventScroll: true }));
   }
 
-  function clearFieldError(field: Field) {
+  function clearFieldError(field: string) {
     setErrors(previous => {
       if (!previous[field]) return previous;
       const next = { ...previous };
@@ -107,9 +132,14 @@ export default function App() {
     if (index === 2) {
       Object.assign(found, closingIssues({ ...draft, kmStart: draft.kmStart.trim(), kmEnd: draft.kmEnd.trim() }));
     }
+    if (index === 0) {
+      if (!draft.technicians.length) found.technicians = 'Selecione ao menos um técnico.';
+      else if (draft.technicians.length > 16) found.technicians = 'Selecione até 16 técnicos por atendimento.';
+      else if (draft.technicians.some(id => !config?.technicians.some(tech => tech.id === id))) found.technicians = 'Remova os técnicos indisponíveis e selecione profissionais ativos.';
+    }
     if (index === 3) {
       if (!draft.clientSignature) found.clientSignature = 'Colete a assinatura do cliente.';
-      if (config?.requireTechnician && !draft.technicianSignature) found.technicianSignature = 'Colete a assinatura do técnico.';
+      for (const id of draft.technicians) if (!draft.technicianSignatures[id]) found['tech-' + id] = 'Colete a assinatura deste técnico.';
     }
     return found;
   }
@@ -135,7 +165,7 @@ export default function App() {
   }
 
   async function finalize() {
-    if (busyRef.current || !config) return;
+    if (busyRef.current || photoBusy || !config) return;
     const report = getValues();
     if (!sessionRef.current.locked) {
       for (let index = 0; index < 4; index++) {
@@ -152,11 +182,14 @@ export default function App() {
     setBusy(true);
     setNotice('');
     const id = sessionRef.current.id || createId();
-    persist({ id, step: 4, locked: true });
+    if (!await persist({ id, step: 4, locked: true })) {
+      setNotice('Não foi possível salvar esta operação no aparelho. Libere espaço antes de finalizar para preservar a emissão.');
+      busyRef.current = false; setBusy(false); return;
+    }
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 65_000);
     try {
-      const response = await fetch('/api/rat', {
+      const response = await apiFetch('/api/rat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ submissionId: id, report }), signal: controller.signal,
       });
@@ -167,28 +200,25 @@ export default function App() {
           if (error.errors) {
             const found = Object.fromEntries(Object.entries(error.errors).map(([field, issues]) => [field, issues?.[0]]));
             setErrors(found);
-            const invalidStep = steps.findIndex(entry => entry.fields.some(field => found[field]));
+            const invalidStep = found.technicians ? 0 : found.technicianSignatures ? 3 : found.photos ? 1
+              : steps.findIndex(entry => entry.fields.some(field => found[field]));
             if (invalidStep >= 0) {
               moveTo(invalidStep);
               focusError(found);
             }
           }
         }
-        setNotice(error.message || 'O servidor não confirmou o envio. Tente novamente.');
+        setNotice(error.message || 'O servidor não confirmou a emissão. Tente novamente com este rascunho.');
         return;
       }
-      const mode = response.headers.get('X-Mail-Mode');
-      if (!response.headers.get('Content-Type')?.includes('application/pdf') || (mode !== 'test' && mode !== 'smtp')) {
-        throw new Error();
-      }
-      const filename = response.headers.get('Content-Disposition')?.match(/filename="([a-z0-9_.-]+)"/i)?.[1] || 'RAT.pdf';
-      const pdf = await response.blob();
-      setResult({ report, pdf, filename, mode });
-      setStorageError(!removeDraft());
+      const emitted = await response.json() as Issuance;
+      if (!/^\d{4}-\d{2}-\d{2}-\d{4}$/.test(emitted.number) || emitted.operationId !== id) throw new Error();
+      setResult(emitted);
+      await persist({ id, step: 4, locked: true, emitted });
       window.scrollTo({ top: 0 });
       requestAnimationFrame(() => heading.current?.focus({ preventScroll: true }));
     } catch {
-      setNotice('A conexão foi interrompida ou o envio não pôde ser confirmado. O rascunho foi mantido. Tente novamente com este mesmo relatório.');
+      setNotice('A conexão foi interrompida. O RAT pode já ter sido emitido. Tente novamente com este mesmo rascunho para recuperar o número.');
     } finally {
       window.clearTimeout(timer);
       busyRef.current = false;
@@ -196,30 +226,34 @@ export default function App() {
     }
   }
 
-  function startOver() {
+  async function startOver() {
+    setBusy(true);
+    busyRef.current = true;
+    discarding.current = true;
+    legacyRef.current = undefined;
     const next = { step: 0, id: '', locked: false };
     sessionRef.current = next;
     setSession(next);
-    reset({ ...emptyDraft });
-    setStorageError(!removeDraft());
+    reset(blankDraft());
+    setStorageError(!await removeDraft());
+    discarding.current = false;
     setResult(null);
+    setConfigAttempt(value => value + 1);
     setConfirmDiscard(false);
     setErrors({});
     setNotice('');
+    setBusy(false);
+    busyRef.current = false;
     window.scrollTo({ top: 0 });
     requestAnimationFrame(() => heading.current?.focus({ preventScroll: true }));
   }
 
-  function download() {
+  async function download() {
     if (!result) return;
-    const url = URL.createObjectURL(result.pdf);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = result.filename;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    setBusy(true); setPdfError('');
+    try { await downloadPdf(result.operationId, result.filename, getValues()); }
+    catch (error) { setPdfError(error instanceof Error ? error.message : 'O RAT já está emitido. Tente gerar o PDF novamente.'); }
+    finally { setBusy(false); }
   }
 
   function field(name: Field, options: {
@@ -235,18 +269,24 @@ export default function App() {
     const control = register(name, { onChange: () => clearFieldError(name) });
     if (options.choices) return <SelectField {...props} control={control} choices={options.choices} />;
     if (options.multiline) {
-      return <TextAreaField {...props} hint={values[name].length.toLocaleString('pt-BR') + ' / ' + detailLimit.toLocaleString('pt-BR')}
-        control={{ ...control, maxLength: detailLimit, rows: 4, placeholder: options.placeholder }} />;
+      return <div className={props.wide ? 'photo-field wide' : 'photo-field'}>
+        <TextAreaField {...props} hint={values[name].length.toLocaleString('pt-BR') + ' / ' + detailLimit.toLocaleString('pt-BR')}
+          control={{ ...control, maxLength: detailLimit, rows: 4, placeholder: options.placeholder }} />
+        {config && photoCategories.includes(name as PhotoCategory) && <Photos category={name as PhotoCategory} photos={values.photos} limits={config.photoLimits}
+          disabled={photoBusy} onBusy={setPhotoBusy} onChange={photos => setValue('photos', photos)} />}
+      </div>;
     }
     if (options.type === 'date') return <DateField {...props} input={control} />;
     if (options.type === 'time') return <TimeField {...props} input={control} />;
     return <TextField {...props} input={{
       ...control,
       placeholder: options.placeholder,
-      maxLength: name === 'number' ? 40 : options.decimal ? 11 : shortLimit,
+      maxLength: options.decimal ? 11 : shortLimit,
       inputMode: options.decimal ? 'decimal' : undefined,
     }} />;
   }
+
+  const previewNumber = configError ? 'Prévia indisponível' : !config ? 'Consultando número…' : config.numberPreview ?? 'Limite diário atingido';
 
   function body() {
     switch (step) {
@@ -254,14 +294,31 @@ export default function App() {
         return <>
           <FormSection title="Identificação do chamado">
             <div className="field-grid call-fields">
-              {field('number',)}{field('serviceType', { choices: serviceTypes })}
+              <div className="calculated"><span id="rat-number-label">Nº RAT · Prévia</span><output aria-labelledby="rat-number-label" aria-describedby="rat-number-hint">{previewNumber}</output><p className="hint" id="rat-number-hint">Confirmado ao finalizar. Pode mudar se outro RAT for emitido antes.</p></div>{field('serviceType', { choices: serviceTypes })}
               {field('ticket', )}{field('date', { type: 'date' })}
               {field('opening', { choices: openingChannels })}
             </div>
           </FormSection>
           <FormSection title="Cliente e equipe">
             <div className="field-grid">{field('client', { placeholder: 'Nome ou razão social' })}{field('branch', { placeholder: 'Unidade ou filial' })}
-              {field('requester', { placeholder: 'Nome do solicitante' })}{field('technician', { placeholder: 'Nome do técnico' })}</div>
+              {field('requester', { placeholder: 'Nome do solicitante' })}</div>
+            <fieldset className="technician-picker" id="field-technicians" tabIndex={-1}>
+              <legend>Técnicos participantes <span className="required">*</span></legend>
+              {config?.technicians.length === 0 && <p className="callout">Nenhum técnico cadastrado. Peça ao responsável para cadastrar os profissionais antes de finalizar.</p>}
+              {[...(config?.technicians || []), ...values.technicians.filter(id => !config?.technicians.some(tech => tech.id === id)).map(id => ({ id, name: 'Técnico indisponível — ' + id, active: false }))].map(tech =>
+                <label className="technician-option" key={tech.id}>
+                  <input type="checkbox" checked={values.technicians.includes(tech.id)} onChange={event => {
+                    if (!event.target.checked && values.technicianSignatures[tech.id] && !window.confirm('Remover ' + tech.name + ' e a assinatura associada?')) return;
+                    const signatures = { ...getValues().technicianSignatures };
+                    if (!event.target.checked) delete signatures[tech.id];
+                    setValue('technicianSignatures', signatures);
+                    setValue('technicians', event.target.checked ? [...values.technicians, tech.id] : values.technicians.filter(id => id !== tech.id));
+                    clearFieldError('technicians');
+                  }} />
+                  <span>{tech.name}</span>
+                </label>)}
+              {errors.technicians && <p className="error-text" role="alert">{errors.technicians}</p>}
+            </fieldset>
           </FormSection>
           <FormSection title="Equipamento">
             <div className="field-grid equipment-fields">{field('equipment', )}{field('sector', { placeholder: 'Ex.: Administrativo' })}
@@ -297,28 +354,34 @@ export default function App() {
         return <FormSection title="Coleta de assinaturas">
             <p className="callout">A ZENET coleta os dados e as assinaturas para documentar o atendimento. O rascunho fica neste navegador até a finalização ou o descarte.</p>
             <div className="signature-list">
-              {signatureKeys.map(name => <SignatureField key={name} id={'field-' + name} title={labels[name]}
-                required={name === 'clientSignature' || Boolean(config?.requireTechnician)}
-                value={values[name]} error={errors[name]} onChange={value => {
-                  setValue(name, value);
-                  clearFieldError(name);
-                }} />)}
+              <SignatureField id="field-clientSignature" title="Assinatura do cliente" required value={values.clientSignature}
+                error={errors.clientSignature} onChange={value => { setValue('clientSignature', value); clearFieldError('clientSignature'); }} />
+              {values.technicians.map(id => <SignatureField key={id} id={'field-tech-' + id}
+                title={config?.technicians.find(tech => tech.id === id)?.name || 'Técnico indisponível'} required
+                value={values.technicianSignatures[id] || ''} error={errors['tech-' + id]}
+                onChange={value => { setValue('technicianSignatures', { ...getValues().technicianSignatures, [id]: value }); clearFieldError('tech-' + id); clearFieldError('technicianSignatures'); }} />)}
             </div>
+            {errors.technicianSignatures && <p className="error-text">{errors.technicianSignatures}</p>}
         </FormSection>;
       default:
         return <>
           <FormSection title="Dados do atendimento"><ReviewFields fields={dataKeys} values={values} /></FormSection>
+          <FormSection title="Técnicos participantes"><ul>{values.technicians.map(id => <li key={id}>{config?.technicians.find(tech => tech.id === id)?.name || 'Técnico indisponível'}</li>)}</ul></FormSection>
           <FormSection title="Relatório técnico"><div className="review-narrative"><ReviewFields fields={reportKeys} values={values} /></div></FormSection>
           <FormSection title="Fechamento">
             <ReviewFields fields={closingKeys} values={values} />
             <div className="review-totals"><span>Duração <strong>{calculated.duration}</strong></span><span>KM total <strong>{calculated.distance}</strong></span></div>
           </FormSection>
           <FormSection title="Assinaturas">
-            <div className="field-grid">{signatureKeys.map(name => <div className="review-signature" key={name}>
-              <h3>{labels[name]}</h3>
-              {values[name] ? <img src={values[name]} alt={labels[name]} /> : <p className="hint">Não coletada</p>}
+            <div className="field-grid">{[{ id: 'client', name: 'Assinatura do cliente', data: values.clientSignature }, ...values.technicians.map(id => ({ id,
+              name: config?.technicians.find(tech => tech.id === id)?.name || 'Técnico indisponível', data: values.technicianSignatures[id] }))].map(item => <div className="review-signature" key={item.id}>
+              <h3>{item.name}</h3>
+              {item.data ? <img src={item.data} alt={'Assinatura — ' + item.name} /> : <p className="hint">Não coletada</p>}
             </div>)}</div>
           </FormSection>
+          {!!values.photos.length && <FormSection title="Registro fotográfico"><div className="photo-gallery">{values.photos.map((photo, index) => <figure key={photo.id}>
+            <img src={photo.data} alt={photo.caption || 'Foto ' + (index + 1)} /><figcaption><strong>Foto {index + 1} — {labels[photo.category]}</strong><p>{photo.caption}</p></figcaption>
+          </figure>)}</div></FormSection>}
         </>;
     }
   }
@@ -329,14 +392,13 @@ export default function App() {
     else nextStep();
   }
 
-  const hasDraft = session.step > 0 || Object.values(values).some(Boolean);
+  const hasDraft = session.step > 0 || dataKeys.some(key => Boolean(values[key])) || values.technicians.length > 0 || values.photos.length > 0;
   const visibleNotice = notice === validationNotice && Object.keys(errors).length === 0 ? '' : notice;
-  const reportNumber = (result?.report.number ?? values.number).trim();
-  const emailEnabled = config?.mailMode === 'smtp';
+  const reportNumber = result?.number;
   const navigation = {
     steps,
     current: step,
-    disabled: session.locked || busy || Boolean(result),
+    disabled: session.locked || busy || photoBusy || Boolean(result),
     complete: Boolean(result),
     onSelect: moveTo,
   };
@@ -356,15 +418,17 @@ export default function App() {
     statusTone = 'active';
   }
   if (result) {
-    statusLabel = result.mode === 'smtp' ? 'Enviado' : 'PDF gerado';
+    statusLabel = 'RAT emitido';
     statusTone = 'success';
   }
 
   return <div className="rat-app">
     <header className="topbar">
       <div className="shell top-inner">
+        <div className="brand-identity">
         <img className="brand-mark" src="/zenet.png" width={387} height={136} alt="ZENET" />
         <p className="brand-text">RAT Digital</p>
+        </div>
         <div className="topbar-status" role="status"><StatusIndicator label={statusLabel} tone={statusTone} /></div>
       </div>
     </header>
@@ -373,20 +437,27 @@ export default function App() {
       <main className="workspace">
         <StepNavigation key={step} {...navigation} compact />
         <div className={step === 0 ? 'record-bar record-bar-compact' : 'record-bar'}>
-          <p className="record-name">{reportNumber ? 'RAT #' + reportNumber : 'Novo atendimento'}</p>
+          <p className="record-name">{reportNumber || (session.locked ? 'Emissão a confirmar' : config?.numberPreview && !configError ? config.numberPreview + ' · Prévia' : 'RAT ainda não emitido')}</p>
         </div>
         {result ? <section className="confirmation">
           <CheckCircle2 className="success-icon" size={28} aria-hidden="true" />
-          <h1 ref={heading} tabIndex={-1}>{result.mode === 'smtp' ? 'RAT enviado com sucesso' : 'RAT finalizado'}</h1>
-          <p className="stage-description">{result.mode === 'smtp'
-            ? 'O relatório foi finalizado e encaminhado por e-mail.'
-            : 'O relatório está pronto para baixar em PDF.'}</p>
-          <div className="result-details"><ReviewFields fields={['number', 'client', 'date']} values={result.report} /></div>
-          {storageError && <p className="error-text">Não foi possível remover o rascunho deste navegador.</p>}
+          <h1 ref={heading} tabIndex={-1}>RAT finalizado com sucesso</h1>
+          <p className="official-number">{result.number}</p>
+          <p className="stage-description">O número oficial foi registrado. Baixe e guarde o PDF: os dados deste RAT ficam apenas neste aparelho.</p>
+          <div className="result-details"><strong>{result.client}</strong><p>{new Date(result.issuedAt).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}</p></div>
+          {pdfError && <p className="error-text" role="alert">{pdfError}</p>}
+          {storageError && <p className="error-text">Não foi possível salvar o rascunho neste navegador. Mantenha esta página aberta e baixe o PDF.</p>}
           <div className="confirmation-actions">
-            <button type="button" className="button secondary" onClick={download}><Download size={16} aria-hidden="true" /> Baixar PDF</button>
-            <button type="button" className="button primary" onClick={startOver}>Novo atendimento</button>
+            <button type="button" className="button secondary" disabled={busy} onClick={() => void download()}><Download size={16} aria-hidden="true" />{busy ? 'Gerando PDF…' : 'Baixar PDF'}</button>
+            <button type="button" className="button primary" disabled={busy} onClick={() => setConfirmDiscard(true)}>Novo atendimento</button>
           </div>
+          {confirmDiscard && <div className="callout warning" role="alert">
+            <p>Já salvou o PDF? Ao iniciar outro atendimento, os dados, fotos e assinaturas deste RAT serão removidos deste aparelho. O servidor não guarda uma cópia.</p>
+            <div className="confirmation-actions">
+              <button type="button" className="button secondary" disabled={busy} onClick={() => setConfirmDiscard(false)}>Voltar</button>
+              <button type="button" className="button primary" disabled={busy} onClick={() => void startOver()}>Iniciar novo atendimento</button>
+            </div>
+          </div>}
         </section> : <>
           <form onSubmit={handleForm} noValidate>
             <div className="stage-head">
@@ -396,7 +467,10 @@ export default function App() {
               </div>
               {step < 3 && <p className="required-note"><span className="required" aria-hidden="true">*</span> Campos obrigatórios</p>}
             </div>
-            <div className="stage-content" key={step}>
+            <fieldset className="stage-content form-body" key={step} disabled={session.locked || busy}>
+              {legacy && <details className="callout"><summary>Rascunho da versão anterior</summary><p>Referência anterior {legacy.number || 'sem número'}. Selecione os técnicos cadastrados e colete as assinaturas novamente para a emissão oficial.</p>
+                {legacy.technician && <p>Técnico informado anteriormente — {legacy.technician}</p>}
+                {legacy.signature && <img className="legacy-signature" src={legacy.signature} alt="Assinatura preservada do rascunho anterior, sem associação automática" />}</details>}
               {storageError && <p role="alert" className="callout warning">O navegador não conseguiu salvar o rascunho. Mantenha esta página aberta até concluir.</p>}
               {configError && <div role="alert" className="callout warning reconnect">
                 <p>O servidor está indisponível. Você pode continuar preenchendo e tentar a conexão antes de finalizar.</p>
@@ -405,30 +479,30 @@ export default function App() {
               {session.locked && <p className="callout">Use este mesmo rascunho para tentar finalizar novamente.</p>}
               {body()}
               {visibleNotice && <p role="alert" className="callout warning">{visibleNotice}</p>}
-            </div>
+            </fieldset>
             <div className="stage-actions">
               <div className="draft-tools">
                 <div className="draft-state" role="status"><StatusIndicator label={statusLabel} tone={statusTone} /></div>
                 <p>{storageError ? 'Não foi possível salvar o rascunho neste navegador.' : 'O rascunho é salvo neste navegador.'}</p>
-                {hasDraft && <button ref={discardButton} type="button" className="subtle-button" disabled={busy}
+                {hasDraft && <button ref={discardButton} type="button" className="subtle-button" disabled={busy || photoBusy}
                   aria-expanded={confirmDiscard} aria-controls="discard-confirmation" onClick={() => setConfirmDiscard(value => !value)}>
                   Descartar rascunho
                 </button>}
               </div>
               <div className="form-actions">
-                <button type="button" className="button secondary" disabled={step === 0 || session.locked || busy}
+                <button type="button" className="button secondary" disabled={step === 0 || session.locked || busy || photoBusy}
                   onClick={() => moveTo(step - 1)}><ArrowLeft size={16} aria-hidden="true" /> Voltar</button>
-                <button type="submit" className="button primary" disabled={busy || (step === 4 && !config)}>
+                <button type="submit" className="button primary" disabled={busy || photoBusy || (step === 4 && !config)}>
                   {step < 4 ? <>Continuar <ArrowRight size={16} aria-hidden="true" /></> :
                     busy ? <><LoaderCircle className="spin" size={16} aria-hidden="true" /> Processando RAT…</> :
-                      session.locked ? 'Tentar novamente' : emailEnabled ? 'Finalizar e enviar RAT' : 'Finalizar RAT'}
+                      session.locked ? 'Recuperar emissão' : 'Finalizar RAT'}
                 </button>
               </div>
             </div>
           </form>
           <section id="discard-confirmation" className="callout warning" hidden={!confirmDiscard || !hasDraft} aria-labelledby="discard-title">
             <h2 id="discard-title">Descartar rascunho?</h2>
-            <p>{session.locked ? 'Há uma tentativa de envio sem confirmação. Confira a caixa de entrada antes de criar outro RAT. O descarte remove os dados e as assinaturas deste navegador.' : 'Os dados e as assinaturas deste relatório serão removidos deste navegador.'}</p>
+            <p>{session.locked ? 'Há uma emissão sem confirmação. Recupere a emissão antes de criar outro atendimento. O descarte remove os dados deste aparelho.' : 'Os dados, as fotografias e as assinaturas deste relatório serão removidos deste aparelho.'}</p>
             <div className="confirmation-actions">
               <button type="button" className="button secondary" disabled={busy} onClick={() => {
                 setConfirmDiscard(false);

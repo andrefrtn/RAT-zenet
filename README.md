@@ -1,79 +1,90 @@
 # RAT Digital ZENET
 
-Aplicação para preencher o Relatório de Atendimento Técnico da ZENET, coletar assinaturas manuscritas e gerar um PDF para envio. O formulário mantém os campos do RAT fornecido e reutiliza a logomarca original. O PDF reorganiza esses campos em seções e cria páginas de continuação quando necessário.
+Aplicação React e TypeScript com API Express e PostgreSQL. O técnico preenche o RAT, seleciona os profissionais ativos, anexa fotografias, coleta as assinaturas e finaliza. O servidor atribui o número oficial e permite baixar ou regenerar o PDF. O envio por e-mail foi removido.
 
-## Executar localmente
+## Configurar
 
-Pré-requisitos: Node.js 22.15 ou superior e npm. Execute os comandos na raiz deste projeto.
+Requer Node.js 22.15 ou superior da série 22 e PostgreSQL 14 ou superior. Use o mesmo banco central em todas as instâncias.
 
 ```powershell
 npm ci
 Copy-Item .env.example .env
+```
+
+Preencha `DATABASE_URL` no `.env`. No computador use a URL externa do PostgreSQL. Se o provedor exigir TLS, use o parâmetro indicado por ele; para a conexão externa do Render, acrescente `?sslmode=verify-full` (ou `&sslmode=verify-full` se já houver outros parâmetros). Não use os valores de exemplo literalmente.
+
+Não é necessário configurar senha de equipe, segredo de sessão nem chave de cifragem de relatórios. O conteúdo dos RATs não é arquivado no servidor.
+
+| Variável | Finalidade |
+| --- | --- |
+| `DATABASE_URL` | Conexão do PostgreSQL central. Utilize TLS com validação do certificado em produção, conforme o provedor. |
+| `NODE_ENV` | `production` no servidor publicado. |
+| `PUBLIC_ORIGIN` | Origem HTTPS externa completa, sem barra final. Obrigatória em produção. |
+| `HOST`, `PORT` | Interface e porta do servidor. No Render configure `HOST=0.0.0.0` e use a porta fornecida pela plataforma. |
+| `TRUST_PROXY_HOPS` | Quantidade de proxies confiáveis. Use `1` somente quando existe um único proxy e o servidor não pode ser acessado contornando-o. |
+| `PHOTO_MAX_COUNT` | Quantidade total de fotos por RAT, padrão 12, máximo 40. |
+| `PHOTO_MAX_FILE_MB` | Limite de cada arquivo original, padrão 10 MB, máximo 15 MB. |
+| `PHOTO_MAX_BYTES` | Limite do JPEG normalizado, padrão 600.000 bytes. |
+| `PHOTO_MAX_EDGE` | Maior dimensão da foto após tratamento, padrão 1600 px. |
+| `PHOTO_QUALITY` | Qualidade JPEG, padrão 78. |
+
+```powershell
+npm run db:migrate
+npm run technicians -- list
+npm run technicians -- add "NOME COMPLETO DO PROFISSIONAL"
 npm run dev
 ```
 
-Em macOS ou Linux, use `cp .env.example .env`. Abra `http://localhost:5173`. O Vite encaminha as chamadas `/api` para a API Express na porta `3001`. Para testar em um celular na mesma rede, use `http://IP-DO-COMPUTADOR:5173` e libere a porta no firewall dessa rede, se necessário. Use apenas dados fictícios nesse teste por HTTP.
+Abra `http://localhost:5173`. O cadastro inicial de técnicos é vazio. A API lista apenas profissionais ativos. O gerenciamento é feito exclusivamente pelo comando administrativo com acesso às credenciais do banco. Para inativar ou reativar um técnico, use `npm run technicians -- deactivate UUID` ou `npm run technicians -- activate UUID`. Esse cadastro pode ser administrado a partir de um computador autorizado conectado ao mesmo PostgreSQL, inclusive quando a hospedagem não oferece terminal.
 
-A configuração inicial deixa `MAIL_TO` vazio. Ao finalizar, a aplicação oferece o download do PDF. O envio por e-mail fica disponível quando o servidor tem um destinatário e o SMTP está habilitado.
+## Emissão e recuperação
 
-## Configurar o envio real
+O campo Nº RAT mostra uma prévia do próximo número, consultada sem gravar ou reservar nada no banco. A prévia é atualizada a cada minuto, ao voltar à aba e ao iniciar outro atendimento. Se outro técnico finalizar primeiro ou o dia mudar, o número definitivo pode ser diferente. Abandonar o formulário não consome a sequência. O número é atribuído exclusivamente ao finalizar. O formato é `AAAA-MM-DD-XXXX`, com data calculada no PostgreSQL em `America/Sao_Paulo`. O contador diário usa UPSERT com incremento atômico e limite de 9999. Restrições únicas protegem o número, a combinação de data e sequência e o identificador da operação.
 
-Edite `.env` no servidor ou configure as mesmas variáveis no serviço de hospedagem.
+O identificador da operação, o número e o contador são gravados na mesma transação. Um bloqueio transacional permite recuperar o mesmo número em novas tentativas concorrentes ou após perda de conexão. O banco mantém um hash SHA-256 do formulário para impedir que a mesma operação seja reutilizada com outros dados. Esse hash não armazena o formulário. IDs e nomes dos técnicos participantes são preservados junto ao número para que alterações posteriores no cadastro não mudem o PDF.
 
-| Variável | Valor |
-| --- | --- |
-| `MAIL_MODE` | `smtp` habilita o envio com destinatário configurado. `test` mantém somente a geração do PDF. |
-| `MAIL_TO` | Endereço de destino. Deixe vazio para disponibilizar apenas o PDF. |
-| `SMTP_HOST` | Endereço do servidor do provedor. |
-| `SMTP_PORT` | Em geral `587` com STARTTLS ou `465` com TLS direto. |
-| `SMTP_SECURE` | `false` para exigir STARTTLS. `true` para TLS direto. |
-| `SMTP_USER`, `SMTP_PASS` | Credenciais SMTP ou senha de aplicativo fornecida pelo provedor. |
-| `SMTP_FROM` | Endereço remetente autorizado pelo provedor. |
-| `REQUIRE_TECH_SIGNATURE` | `true` para exigir também a assinatura do técnico. |
+O PostgreSQL possui somente três tabelas:
 
+- `rat_technicians`: nomes, IDs e situação dos técnicos.
+- `rat_counters`: último número de cada dia.
+- `rat_numbers`: números emitidos, data, identificador da operação, hash e nomes/IDs dos técnicos participantes.
 
+Não são gravados no banco os dados de clientes, equipamento, textos do relatório, fotos, legendas, assinaturas nem PDFs. O conteúdo é enviado ao servidor por requisição, processado apenas em memória e descartado ao encerrar o processamento. A aplicação não registra esses corpos em logs nem os escreve em arquivos.
 
-Para usar o Gmail como remetente, configure `SMTP_HOST=smtp.gmail.com` e as credenciais de um remetente autorizado. Se a conta oferecer senhas de aplicativo, a opção exige verificação em duas etapas. [Ajuda da Conta do Google](https://support.google.com/accounts/answer/185833?hl=pt-BR). [Documentação SMTP do Nodemailer](https://nodemailer.com/smtp).
+O PDF é gerado depois da emissão. Se falhar, o botão Baixar PDF reenvia o rascunho local original e utiliza o mesmo número. Não existe consulta central de RATs emitidos nem recuperação do conteúdo em outro dispositivo. Salve o PDF antes de iniciar outro atendimento ou limpar os dados do navegador. O número continuará registrado mesmo que o rascunho seja perdido.
 
-## Publicar
+### Atualizar a versão anterior
 
-```sh
-npm ci
-npm run build
+A migração transfere os números e seus identificadores de `rat_reports` para `rat_numbers`, preserva os técnicos e mantém o contador no maior valor já emitido. Em seguida remove a antiga tabela `rat_reports`, incluindo seu conteúdo arquivado. Isso ocorre ao executar `npm run db:migrate` ou ao iniciar o servidor atualizado. Nenhum contador é reiniciado. Se precisar de um PDF antigo cujo rascunho não está neste aparelho, baixe-o antes de aplicar esta atualização. Números legados sem nomes de técnicos registrados usam o cadastro atual ao regenerar a partir do rascunho original.
+
+## Acesso
+
+O acesso é direto, sem login ou senha de equipe. Qualquer pessoa com acesso ao endereço pode emitir RATs. Gerar novamente um PDF exige o conteúdo original do rascunho e seu identificador; não existe rota para consultar ou baixar relatórios arquivados. Operações mutáveis validam a origem; os limites de requisições e processamento simultâneo continuam ativos. O gerenciamento de técnicos exige as credenciais do banco pelo comando administrativo.
+
+## Rascunhos e imagens
+
+Os rascunhos usam IndexedDB e preservam textos, IDs dos técnicos, assinaturas, fotos, legendas e a operação de emissão. O identificador da operação é salvo antes de chamar o servidor. Se o armazenamento falhar, a emissão fica bloqueada para evitar perder a referência necessária à recuperação.
+
+Ao abrir um rascunho antigo, os campos de texto e a assinatura do cliente são migrados. A referência manual antiga e a assinatura do técnico anterior ficam disponíveis para consulta, sem associação automática a um profissional do novo cadastro. Selecione os técnicos ativos e colete suas assinaturas novamente.
+
+As fotografias aceitam JPEG, PNG e WebP e são preparadas no servidor antes de entrar no rascunho. A conexão é necessária para essa preparação. O servidor corrige a orientação EXIF, limita as dimensões, converte para JPEG e remove os metadados originais. O limite de entrada é de 36 megapixels. As fotos normalizadas permanecem em IndexedDB até iniciar outro atendimento ou descartar o rascunho. Não são arquivadas no banco nem no disco do servidor. O preparo e o PDF usam apenas memória durante a requisição.
+
+## Publicar no Render
+
+Suba o código atualizado e configure um PostgreSQL persistente. No serviço web use o build `npm ci --include=dev && npm run build` e o start `npm start`. Configure `NODE_ENV=production`, `HOST=0.0.0.0`, a origem HTTPS e `DATABASE_URL`. O processo aplica a migração de forma transacional e segura entre instâncias ao iniciar. O usuário do banco precisa poder criar o esquema inicial ou a migração deve ser executada previamente por um administrador.
+
+Mantenha `client/public/zenet.png` disponível no servidor, pois o PDF utiliza a logomarca. O conteúdo público fica em `dist/client`. Credenciais, banco, testes e materiais de revisão ficam fora da pasta pública. O caminho de verificação de saúde é `/healthz`.
+
+Os antigos arquivos locais de comprovantes e as variáveis SMTP pertencem à versão anterior. A nova emissão utiliza as tabelas `rat_technicians`, `rat_counters` e `rat_numbers`. PDFs antigos não recebem números oficiais retroativamente.
+
+## Testes
+
+Configure `TEST_DATABASE_URL` para um PostgreSQL exclusivo de testes e disponibilize a variável no ambiente do terminal. Os testes de integração criam e removem esquemas isolados com prefixo `rat_test_`. O comando recusa executar esses testes quando a conexão não está configurada.
+
+```powershell
+$env:TEST_DATABASE_URL="CONEXAO_DO_BANCO_DE_TESTES"
 npm test
-npm start
-```
-
-O Express serve o site e a API pela mesma origem. Em produção, execute `npm start` na raiz do projeto sob um supervisor ou serviço de hospedagem Node. Mantenha `client/public/zenet.png` junto ao build porque o gerador de PDF usa a logomarca. O servidor precisa de acesso de saída à porta SMTP selecionada.
-
-O conteúdo público fica em `dist/client`. Os arquivos de revisão do Impeccable, os testes e o PDF de referência ficam no ambiente de desenvolvimento. Mantenha `MAIL_TO` vazio enquanto o destinatário estiver em aberto.
-
-Coloque o processo atrás de um proxy HTTPS. Configure `PUBLIC_ORIGIN` com a origem externa completa, por exemplo `https://rat.suaempresa.com.br`, sem barra final. Se houver exatamente um proxy confiável, inacessível por caminhos que contornem o proxy, use `TRUST_PROXY_HOPS=1` para que o limite por IP use o endereço encaminhado pelo proxy. Em um contêiner, configure `HOST=0.0.0.0` se o proxy precisar conectar pela rede interna.
-
-Execute uma instância e monte `RECEIPTS_DIR` em um volume persistente. Os comprovantes guardam UUID, hash e estado da tentativa. Dados do RAT, PDF e assinaturas não são gravados pelo servidor. Para uso interno, controle o acesso na rede ou no proxy. A versão inicial dispensa login e banco de dados.
-
-## Regras de preenchimento
-
-- Horários são interpretados em ordem a partir do comparecimento, com virada de dia quando o horário seguinte é menor. O intervalo completo deve ser inferior a 24 horas. A duração usa início e término. Horários de início e término iguais dão duração zero.
-- KM aceita até três casas decimais e exige os dois valores quando há deslocamento informado. O KM final deve ser igual ou superior ao inicial.
-- A assinatura do cliente é obrigatória. O técnico pode assinar no segundo quadro. Os textos técnicos aceitam até 12.000 caracteres por campo. O PDF usa fonte Noto Sans com suporte ao alfabeto latino e representa caracteres fora dessa fonte pelo código Unicode.
-- O rascunho inclui as assinaturas e fica no navegador. Use **Descartar rascunho** para removê-lo. Depois da confirmação, o PDF fica disponível para download na tela de resultado até sair dela.
-- Se a conexão cair durante o envio, tente novamente com o mesmo relatório. Se o SMTP tiver aceitado e o comprovante tiver sido gravado, o servidor devolve o PDF sem reenviar. Se a aceitação ficar indeterminada, o servidor bloqueia novo disparo para aquele UUID. Confira a caixa de entrada antes de criar outro relatório. Os comprovantes devem ser preservados durante o período em que rascunhos pendentes possam ser retomados.
-
-## Verificações
-
-```sh
-npm test
-npm run check
 npm run build
 ```
 
-Os testes cobrem cálculos, validação, PNG, geração e paginação do PDF, limite de corpo, destinatário vazio, repetição concorrente e recuperação de tentativas. O envio é simulado nos testes automatizados.
-
-## Estrutura
-
-- `client/` contém a interface React, a coleta de assinaturas por Pointer Events e o armazenamento local.
-- `shared/` contém os campos, a validação Zod e os cálculos usados em ambos os lados.
-- `server/` contém a API Express, a composição PDF, o SMTP e o controle de duplicidade.
-- `tests/` contém os testes e os dados fictícios de verificação.
-
+Os testes cobrem sequência e virada diária, concorrência em múltiplas conexões, limite diário, unicidade e imutabilidade, idempotência, perda de conexão, recuperação após falha de PDF, acesso direto sem senha, validação de origem, técnicos, assinaturas, fotografias, orientação, compressão e migração de rascunhos, remoção do arquivo legado e ausência de conteúdo de RAT nas tabelas.

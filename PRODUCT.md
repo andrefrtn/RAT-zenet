@@ -8,7 +8,7 @@ web
 
 ## Stack
 
-React, TypeScript, Tailwind CSS e Vite no front-end. Aplicação web responsiva, com prioridade para smartphones e suporte a desktop.
+React, TypeScript, Tailwind CSS e Vite no front-end. API Node.js com PostgreSQL central. Aplicação responsiva, com prioridade para smartphones e suporte a desktop.
 
 ## Users
 
@@ -24,18 +24,19 @@ O ZENET RAT Digital é uma ferramenta de trabalho de campo. Seu diferencial é r
 
 ## Operating Context
 
-1. **Atendimento.** Identificar cliente, técnico, equipamento e chamado.
-2. **Relatório Técnico.** Registrar problemas, soluções e pendências.
+1. **Atendimento.** Identificar cliente, equipamento e chamado, e selecionar os técnicos ativos do cadastro central.
+2. **Relatório Técnico.** Registrar problemas, soluções e pendências, com fotografias e legendas opcionais.
 3. **Fechamento.** Consolidar o tempo de atendimento e a quilometragem com os cálculos automáticos existentes.
-4. **Assinaturas.** Coletar as assinaturas manuscritas do cliente e do técnico diretamente na tela.
-5. **Revisão e envio.** Conferir os dados e as assinaturas antes de finalizar o RAT. Após a confirmação, a interface disponibiliza o PDF para download.
+4. **Assinaturas.** Coletar a assinatura do cliente e uma assinatura obrigatória por técnico participante, vinculada ao respectivo ID.
+5. **Revisão.** Conferir os dados, as fotografias e as assinaturas. Ao finalizar, o servidor atribui o número oficial e permite baixar ou regenerar o PDF.
 
 ## Capabilities and Constraints
 
 - Preservar a validação de campos obrigatórios, o salvamento local de rascunhos, os cálculos automáticos e o fluxo de cinco etapas.
-- Preservar a captura das duas assinaturas e o traçado com o dedo em telas sensíveis ao toque. A assinatura do cliente é obrigatória. A exigência da assinatura do técnico depende da configuração existente.
-- Limitar as alterações ao front-end. Manter a lógica de negócio existente e deixar back-end, autenticação e banco de dados fora do escopo.
-- Disponibilizar o PDF ao finalizar o RAT. O envio por e-mail fica disponível somente quando o servidor tem destinatário e SMTP configurados.
+- Preservar o traçado por toque, mouse e caneta. Todas as assinaturas dos técnicos selecionados e a assinatura do cliente são obrigatórias.
+- O campo Nº RAT mostra uma prévia sem reserva. Apenas a finalização consome a sequência; a prévia pode mudar com outras emissões ou na virada do dia.
+- A emissão oficial usa PostgreSQL central, transações e idempotência. O acesso é direto, sem login ou senha de equipe.
+- Finalizar e disponibilizar o PDF sem envio por e-mail. O número oficial segue AAAA-MM-DD-XXXX, com data de São Paulo e limite diário de 9999. Rascunhos com fotos e assinaturas usam IndexedDB. O PostgreSQL guarda somente o cadastro dos técnicos e os números emitidos, com identificador e hash para evitar duplicidade. Dados de clientes, textos, fotos e assinaturas permanecem apenas no rascunho IndexedDB do aparelho. O servidor processa imagens e PDF em memória, sem arquivar o conteúdo. Não há histórico central nem recuperação entre dispositivos.
 
 ## Brand Commitments
 

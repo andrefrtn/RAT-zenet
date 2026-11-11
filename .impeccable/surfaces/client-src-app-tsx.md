@@ -39,3 +39,7 @@ Capturas da versão final com dados fictícios em [mobile](../review/mobile.png)
 ## Refinamento visual
 
 A interface mantém a paleta ZENET e usa a tipografia nativa do sistema. No desktop, a ficha usa um painel branco com borda leve ao lado da navegação. No celular, a ficha conserva os controles de 48 px. As faixas, o número do RAT e os marcadores de seção do PDF usam o azul institucional. A logomarca oficial conserva suas cores.
+
+## Emissão centralizada e anexos
+
+O número é emitido pelo PostgreSQL ao finalizar, com operação idempotente e data de São Paulo. O acesso é direto, sem login ou senha de equipe. Os técnicos ativos são selecionados por ID, com uma assinatura por profissional. Fotos, legendas e assinaturas ficam apenas no rascunho IndexedDB do aparelho. O servidor gera o PDF em memória. O PostgreSQL mantém apenas técnicos, contadores e metadados mínimos dos números emitidos. Não há consulta central de relatórios. O PDF preserva o azul institucional e inclui o registro fotográfico. O cadastro de produção começa vazio. Os testes usam profissionais e imagens fictícios.

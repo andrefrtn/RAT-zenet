@@ -19,6 +19,16 @@ export const statuses = ['Operacional', 'Pendente', 'Laboratório', 'Reparo Exte
 export const detailLimit = 12_000;
 export const shortLimit = 120;
 export const signatureLimit = 280_000;
+export const photoCategories = ['problem', 'solution', 'pending', 'notes'] as const;
+export type PhotoCategory = typeof photoCategories[number];
+export const defaultPhotoLimits = { maxCount: 12, maxFileBytes: 10 * 1024 * 1024, maxBytes: 600_000, maxEdge: 1600, quality: 78 };
+export type PhotoLimits = typeof defaultPhotoLimits;
+export type Technician = { id: string; name: string; active: boolean };
+export const photoSchema = z.object({
+  id: z.uuidv4(), category: z.enum(photoCategories), caption: z.string().trim().max(240),
+  data: z.string().max(1_000_000).regex(/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/),
+}).strict();
+export type Photo = z.infer<typeof photoSchema>;
 
 export const labels = {
   number: 'Nº RAT', serviceType: 'Tipo de atendimento', ticket: 'Ticket/OS',
@@ -32,12 +42,11 @@ export const labels = {
 };
 
 export const dataKeys = [
-  'number', 'serviceType', 'ticket', 'opening', 'date', 'client', 'branch',
-  'requester', 'technician', 'equipment', 'sector', 'serial', 'asset',
+  'serviceType', 'ticket', 'opening', 'date', 'client', 'branch',
+  'requester', 'equipment', 'sector', 'serial', 'asset',
 ] as const;
 export const reportKeys = ['problem', 'solution', 'pending'] as const;
 export const closingKeys = ['arrival', 'start', 'end', 'kmStart', 'kmEnd', 'status', 'notes'] as const;
-export const signatureKeys = ['clientSignature', 'technicianSignature'] as const;
 
 const singleLine = z.string().trim().max(shortLimit).regex(/^[^\p{Cc}\p{Zl}\p{Zp}]*$/u, 'Use uma única linha de texto.');
 const required = singleLine.min(1, 'Preencha este campo.');
@@ -50,16 +59,16 @@ const signature = z.string().max(signatureLimit, 'A assinatura excede o tamanho 
   .refine(value => value === '' || /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(value), 'Assinatura PNG inválida.');
 
 export const ratFields = z.object({
-  number: required.max(40), serviceType: z.enum(serviceTypes, { error: 'Selecione o tipo de atendimento.' }),
+  serviceType: z.enum(serviceTypes, { error: 'Selecione o tipo de atendimento.' }),
   ticket: singleLine, opening: z.enum(openingChannels, { error: 'Selecione o canal de abertura.' }),
   date: z.iso.date('Informe uma data válida.').refine(value => !value.startsWith('0000'), 'Informe uma data válida.'),
-  client: required, branch: singleLine, requester: singleLine, technician: required,
+  client: required, branch: singleLine, requester: singleLine,
   equipment: required, sector: singleLine, serial: singleLine, asset: singleLine,
   problem: detail.refine(Boolean, 'Descreva o problema relatado.'),
   solution: detail, pending: detail, arrival: hour, start: hour, end: hour,
   kmStart: kilometer, kmEnd: kilometer,
   status: z.enum(statuses, { error: 'Selecione a situação do equipamento.' }),
-  notes: detail, clientSignature: signature, technicianSignature: signature,
+  notes: detail, clientSignature: signature,
 }).strict();
 
 function timeMinutes(value: string) {
@@ -106,22 +115,44 @@ export function closingIssues(values: Pick<Draft, 'arrival' | 'start' | 'end' | 
   return issues;
 }
 
-export function ratSchema(requireTechnician: boolean) {
-  return ratFields.superRefine((values, ctx) => {
+export const submissionFields = ratFields.extend({
+  technicians: z.array(z.uuidv4()).min(1, 'Selecione ao menos um técnico.').max(16),
+  technicianSignatures: z.record(z.uuidv4(), signature),
+  photos: z.array(photoSchema).max(40),
+}).strict();
+
+export function ratSchema() {
+  return submissionFields.superRefine((values, ctx) => {
     for (const [path, message] of Object.entries(closingIssues(values))) {
       ctx.addIssue({ code: 'custom', path: [path], message });
     }
     if (!values.clientSignature) ctx.addIssue({ code: 'custom', path: ['clientSignature'], message: 'Colete a assinatura do cliente.' });
-    if (requireTechnician && !values.technicianSignature) {
-      ctx.addIssue({ code: 'custom', path: ['technicianSignature'], message: 'Colete a assinatura do técnico.' });
+    if (new Set(values.technicians).size !== values.technicians.length) {
+      ctx.addIssue({ code: 'custom', path: ['technicians'], message: 'Um técnico só pode ser selecionado uma vez.' });
+    }
+    for (const id of values.technicians) {
+      if (!values.technicianSignatures[id]) ctx.addIssue({ code: 'custom', path: ['technicianSignatures', id], message: 'Colete a assinatura deste técnico.' });
+    }
+    for (const id of Object.keys(values.technicianSignatures)) {
+      if (!values.technicians.includes(id)) ctx.addIssue({ code: 'custom', path: ['technicianSignatures', id], message: 'Assinatura sem técnico participante.' });
+    }
+    if (new Set(values.photos.map(photo => photo.id)).size !== values.photos.length) {
+      ctx.addIssue({ code: 'custom', path: ['photos'], message: 'Fotografia duplicada.' });
     }
   });
 }
 
-export type Rat = z.infer<typeof ratFields>;
-export type Field = keyof Rat;
-export type Draft = Record<Field, string>;
-export const emptyDraft = Object.fromEntries(Object.keys(ratFields.shape).map(key => [key, ''])) as Draft;
+export type Submission = z.infer<typeof submissionFields>;
+export type Field = keyof typeof ratFields.shape;
+export type Draft = Record<Field, string> & Pick<Submission, 'technicians' | 'technicianSignatures' | 'photos'>;
+export type Rat = Omit<Submission, 'technicians' | 'technicianSignatures'> & {
+  number: string; issuedAt: string; technicians: { id: string; name: string; signature: string }[];
+};
+export type Issuance = { operationId: string; number: string; issuedAt: string; client: string; filename: string };
+export const emptyDraft = {
+  ...Object.fromEntries(Object.keys(ratFields.shape).map(key => [key, ''])) as Record<Field, string>,
+  technicians: [], technicianSignatures: {}, photos: [],
+} as Draft;
 
 export function displayDate(date: string) {
   const [year, month, day] = date.split('-');

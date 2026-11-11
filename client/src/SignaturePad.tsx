@@ -90,8 +90,8 @@ export function SignatureField({ id, title, value, required, error, onChange }: 
           <h3 id={id} tabIndex={-1}>{title}</h3>
           <p className="field-tag">{required ? 'Obrigatória' : 'Opcional'}</p>
         </div>
-        <button className="subtle-button" type="button" onClick={clear}>
-          Limpar
+        <button className="subtle-button" type="button" onClick={clear} aria-label={'Limpar assinatura — ' + title}>
+          Limpar assinatura
         </button>
       </div>
       <div className={'signature-surface' + (error ? ' invalid' : value ? ' captured' : '')}>

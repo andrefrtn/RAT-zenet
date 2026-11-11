@@ -1,45 +1,33 @@
 import { z } from 'zod';
+import { defaultPhotoLimits } from '../shared/rat.js';
 
-const settingsSchema = z.object({
+const schema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3001),
-  HOST: z.string().min(1).default('127.0.0.1'),
-  REQUIRE_TECH_SIGNATURE: z.enum(['true', 'false']).default('false'),
-  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(8).default(0),
-  RECEIPTS_DIR: z.string().min(1).default('./data/receipts'),
+  HOST: z.string().min(1).default('0.0.0.0'),
+  DATABASE_URL: z.string().regex(/^postgres(?:ql)?:\/\//),
   PUBLIC_ORIGIN: z.string().default('').refine(value => {
     if (!value) return true;
-    try {
-      const url = new URL(value);
-      return url.origin === value && url.protocol === 'https:';
-    } catch {
-      return false;
-    }
+    try { return new URL(value).origin === value && value.startsWith('https://'); } catch { return false; }
   }),
-  MAIL_MODE: z.enum(['test', 'smtp']).default('test'),
-  MAIL_TO: z.string().trim().default('').refine(value => !value || z.email().safeParse(value).success, 'Informe um endereço de e-mail.'),
-  SMTP_HOST: z.string().default(''),
-  SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
-  SMTP_SECURE: z.enum(['true', 'false']).default('false'),
-  SMTP_USER: z.string().default(''),
-  SMTP_PASS: z.string().default(''),
-  SMTP_FROM: z.string().default(''),
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(8).default(0),
+  PHOTO_MAX_COUNT: z.coerce.number().int().min(1).max(40).default(defaultPhotoLimits.maxCount),
+  PHOTO_MAX_FILE_MB: z.coerce.number().int().min(1).max(15).default(10),
+  PHOTO_MAX_BYTES: z.coerce.number().int().min(50_000).max(600_000).default(defaultPhotoLimits.maxBytes),
+  PHOTO_MAX_EDGE: z.coerce.number().int().min(640).max(2000).default(defaultPhotoLimits.maxEdge),
+  PHOTO_QUALITY: z.coerce.number().int().min(50).max(90).default(defaultPhotoLimits.quality),
 }).superRefine((value, ctx) => {
-  if (value.MAIL_MODE !== 'smtp' || !value.MAIL_TO) return;
-  for (const key of ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM'] as const) {
-    if (!value[key]) ctx.addIssue({ code: 'custom', path: [key], message: 'Configuração SMTP obrigatória.' });
-  }
-  if (value.SMTP_FROM && !z.email().safeParse(value.SMTP_FROM).success) {
-    ctx.addIssue({ code: 'custom', path: ['SMTP_FROM'], message: 'Informe um endereço de e-mail.' });
-  }
+  if (value.NODE_ENV === 'production' && !value.PUBLIC_ORIGIN) ctx.addIssue({ code: 'custom', path: ['PUBLIC_ORIGIN'], message: 'Configure a origem HTTPS.' });
 });
-
-export type Settings = z.infer<typeof settingsSchema>;
-
-export function settingsFrom(env: NodeJS.ProcessEnv) {
-  const result = settingsSchema.safeParse(env);
-  if (!result.success) {
-    throw new Error('Revise as variáveis de ambiente: ' + result.error.issues.map(issue => issue.path.join('.')).join(', '));
-  }
-  const settings = result.data;
-  return settings.MAIL_TO ? settings : { ...settings, MAIL_MODE: 'test' as const };
+export type Settings = z.infer<typeof schema>;
+export function settingsFrom(env: NodeJS.ProcessEnv): Settings {
+  const result = schema.safeParse(env);
+  if (!result.success) throw new Error('Revise as variáveis de ambiente: ' + result.error.issues.map(issue => issue.path.join('.')).join(', '));
+  return result.data;
+}
+export function photoLimits(settings: Settings) {
+  return {
+    maxCount: settings.PHOTO_MAX_COUNT, maxFileBytes: settings.PHOTO_MAX_FILE_MB * 1024 * 1024,
+    maxBytes: settings.PHOTO_MAX_BYTES, maxEdge: settings.PHOTO_MAX_EDGE, quality: settings.PHOTO_QUALITY,
+  };
 }

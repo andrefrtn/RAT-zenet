@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.15.0"
+    "node": ">=22.15.0 <23"
   },
   "scripts": {
     "dev": "concurrently --kill-others -n api,web \"npm:dev:api\" \"npm:dev:web\"",
@@ -13,7 +13,9 @@
     "check": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "build": "npm run check && vite build && tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "db:migrate": "tsx server/manage.ts migrate",
+    "technicians": "tsx server/manage.ts"
   },
   "dependencies": {
     "@fontsource/noto-sans": "^5.2.0",
@@ -23,24 +25,26 @@
     "express-rate-limit": "^8.0.0",
     "helmet": "^8.1.0",
     "lucide-react": "^0.511.0",
-    "nodemailer": "^10.5.0",
     "pdf-lib": "^1.17.1",
+    "pg": "^8.23.1",
     "pngjs": "^7.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-hook-form": "^7.57.0",
+    "sharp": "^0.35.5",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
-    "@types/nodemailer": "^8.0.2",
+    "@types/pg": "^8.23.1",
     "@types/pngjs": "^6.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.5.0",
     "concurrently": "^9.1.0",
+    "fake-indexeddb": "^6.2.8",
     "tailwindcss": "^4.1.0",
     "tsx": "^4.19.0",
     "typescript": "~5.8.3",

@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import fontkit from '@pdf-lib/fontkit';
 import { PDFDocument, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
 import { company, dataKeys, displayDate, labels, totals, type Rat } from '../shared/rat.js';
+import { signatureImage } from './signatures.js';
 
 const require = createRequire(import.meta.url);
 const width = 595.28;
@@ -21,8 +22,8 @@ function filenamePart(value: string, max: number) {
     .replace(/^_+|_+$/g, '').slice(0, max).replace(/_+$/, '') || 'sem_identificacao';
 }
 
-export function pdfFilename(rat: Rat) {
-  return 'RAT_' + filenamePart(rat.number, 40) + '_' + filenamePart(rat.client, 72) + '_' + rat.date + '.pdf';
+export function pdfFilename(rat: Pick<Rat, 'number' | 'client'>) {
+  return 'RAT_' + rat.number + '_' + filenamePart(rat.client, 72) + '.pdf';
 }
 
 function wrap(text: string, font: PDFFont, size: number, maxWidth: number) {
@@ -51,7 +52,7 @@ function wrap(text: string, font: PDFFont, size: number, maxWidth: number) {
   });
 }
 
-export async function generatePdf(rat: Rat, signatures: { client: Uint8Array; technician?: Uint8Array }) {
+export async function generatePdf(rat: Rat) {
   const doc = await PDFDocument.create();
   doc.registerFontkit(fontkit);
   const [regularBytes, boldBytes, logoBytes] = await Promise.all([
@@ -139,7 +140,8 @@ export async function generatePdf(rat: Rat, signatures: { client: Uint8Array; te
 
   newPage(true);
   section('01  Dados do atendimento');
-  grid(dataKeys.filter(key => key !== 'number').map(key => [labels[key], key === 'date' ? displayDate(rat.date) : rat[key]]), 3);
+  grid(dataKeys.map(key => [labels[key], key === 'date' ? displayDate(rat.date) : rat[key]]), 3);
+  detail('Técnicos participantes', rat.technicians.map(tech => tech.name).join('; '));
   section('02  Relatório técnico');
   detail(labels.problem, rat.problem);
   detail(labels.solution, rat.solution);
@@ -153,23 +155,43 @@ export async function generatePdf(rat: Rat, signatures: { client: Uint8Array; te
   ], 4);
   detail(labels.notes, rat.notes);
 
-  reserve(127);
+  reserve(160);
   section('04  Assinaturas');
   const signatureWidth = (inner - 22) / 2;
-  for (const [index, [label, bytes]] of [
-    [labels.clientSignature, signatures.client],
-    [labels.technicianSignature, signatures.technician],
-  ].entries()) {
-    const x = margin + index * (signatureWidth + 22);
-    page!.drawRectangle({ x, y: y - 69, width: signatureWidth, height: 77, borderColor: line, borderWidth: 1 });
-    if (bytes) {
-      const image = await doc.embedPng(bytes as Uint8Array);
+  const signatures = [{ label: labels.clientSignature, data: rat.clientSignature },
+    ...rat.technicians.map(tech => ({ label: tech.name, data: tech.signature }))];
+  for (let offset = 0; offset < signatures.length; offset += 2) {
+    const row = signatures.slice(offset, offset + 2).map(item => ({ ...item, rows: wrap(printable(item.label), bold, 9, signatureWidth) }));
+    const rowHeight = 92 + Math.max(...row.map(item => item.rows.length)) * 12;
+    if (y - rowHeight < 69) { newPage(); section('04  Assinaturas (continuação)'); }
+    for (const [index, item] of row.entries()) {
+      const x = margin + index * (signatureWidth + 22);
+      page!.drawRectangle({ x, y: y - 69, width: signatureWidth, height: 77, borderColor: line, borderWidth: 1 });
+      const image = await doc.embedPng(signatureImage(item.data));
       const size = image.scaleToFit(signatureWidth - 22, 59);
       page!.drawImage(image, { x: x + (signatureWidth - size.width) / 2, y: y - 69 + (77 - size.height) / 2, ...size });
-    } else {
-      text('Não coletada', x + 12, y - 34, 9, normal, slate);
+      item.rows.forEach((label, lineIndex) => text(label, x, y - 83 - lineIndex * 12, 9, bold, slate));
     }
-    text(label as string, x, y - 83, 9, bold, slate);
+    y -= rowHeight;
+  }
+
+  if (rat.photos.length) {
+    newPage();
+    section('05  Registro fotográfico');
+    for (const [index, photo] of rat.photos.entries()) {
+      const caption = wrap(printable(photo.caption), normal, 9, inner);
+      const blockHeight = 250 + caption.length * 13;
+      if (y - blockHeight < 69) { newPage(); section('05  Registro fotográfico (continuação)'); }
+      text('Foto ' + (index + 1) + ' - ' + labels[photo.category], margin, y, 10, bold, blue);
+      y -= 16;
+      const bytes = Buffer.from(photo.data.split(',')[1], 'base64');
+      const image = await doc.embedJpg(new Uint8Array(bytes));
+      const size = image.scaleToFit(inner, 215);
+      page!.drawImage(image, { x: margin + (inner - size.width) / 2, y: y - size.height, ...size });
+      y -= 225;
+      for (const line of caption) { text(line, margin, y, 9, normal, slate); y -= 13; }
+      y -= 12;
+    }
   }
 
   const pages = doc.getPages();
